@@ -1,0 +1,252 @@
+---
+title: "Casus 1 Data Engineer Macro-economie"
+author: "Kasper Hermanns"
+date: "2026-03-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Laden van benodigde packages
+
+```{r}
+
+library(tidyverse)
+library(cbsodataR)
+rm(list=ls()) # Verwijder alles uit de huidige environment
+
+```
+
+## Casus 1 Data Engineer Macro-economie
+
+### In deze casus werk ik met de cijfers over de consumentenprijsindex (CPI).
+
+De CPI cijfers zijn in te zien op Statline: <https://opendata.cbs.nl/#/CBS/nl/dataset/83131NED/table?ts=1713952795072>
+
+Tabelbeschrijving:
+
+Deze tabel bevat cijfers over het prijsverloop van een pakket goederen en diensten dat een gemiddeld Nederlands huishouden aanschaft. Dit wordt de consumentenprijsindex (CPI) genoemd. In de tabel staat ook de afgeleide consumentenprijsindex: dit is de CPI waarin het effect van veranderingen in de tarieven van productgebonden belastingen (bijvoorbeeld btw en accijns op alcohol en tabak) en subsidies en van consumptiegebonden belastingen (bijvoorbeeld motorrijtuigenbelasting) is verwijderd.
+
+Daarnaast laat de tabel de maandmutatie en de jaarmutatie van de CPI zien. De jaarmutatie van de totale bestedingen staat bekend als de inflatie. De cijfers zijn in 2025 over 338 productgroepen te bekijken. Verder staan er 34 samentellingen van productgroepen (speciale aggregaten) in de tabel. Van elke productgroep is tevens te vinden hoeveel de Nederlandse consument er aan uitgeeft in verhouding tot zijn totale uitgaven. Dit noemen we de wegingscoëfficiënt. De totale weging is 100.000.
+
+Cijfers van de CPI worden elke maand gepubliceerd. Daarnaast wordt aan het einde van het jaar een jaarcijfer bekendgemaakt. De CPI van een kalenderjaar wordt berekend als het gemiddelde van de indexcijfers van de twaalf maanden van dat jaar.
+
+### Laden van de data
+
+```{r cars}
+
+# Het ID van deze tabel is 83131NED, deze wordt gebruikt als variabele om de data en metadata in te laden
+table_id <- "83131NED"
+
+data <- cbs_get_data(table_id)
+data <- cbs_add_date_column(data)
+metadata <- cbs_get_meta(table_id)
+head(data,20)
+
+
+
+```
+
+## Input parameters
+
+Hier zie je welke waarden de input parameters zullen hebben die gebruikt worden voor de functies om kwartaalcijfers te genereren.
+
+We willen kwartaalcijfers met kwartaalmutaties genereren voor producten over een bepaalde verslagperiode. Dit sturen we d.m.v. deze input parameters:
+
+- product_keys; codes van de 'Bestedingscategorieen' 
+
+- period_begin; begin van de verslagperiode 
+
+- period_end; einde van de verslagperiode
+
+```{r pressure, include=FALSE}
+
+print(metadata$Bestedingscategorieen %>%
+        filter(str_detect(Title, "Fruit")))
+print(metadata$Bestedingscategorieen %>%
+        filter(str_detect(Title, "Gas")))
+print(metadata$Bestedingscategorieen %>%
+        filter(str_detect(Title, "Werkelijke woninghuur")))
+
+# Er is gekozen voor producten die interessant zijn omdat ze een seizoensgebonden en logisch patroon laten zien in hun kwartaalmutaties, dat zijn de volgende Bestedingscategorieen:
+# 1. Fruit (Key: CPI011600); aanbod seizoensgebonden
+# 2. Gas (Key: CPI045200); vraag seizoensgebonden
+# 3. Werkelijke woninghuur (Key: CPI041000); deze veranderen maar1 keer in het jaar, in juli.
+product_keys <- c("CPI011600","CPI045200","CPI041000")
+
+# Hier wordt het begin en einde van de verslagperiode gedefinieerd. Er is voor specifieke dagen gekozen i.p.v. hele jaren om te laten zien dat de code dat ook aankan.
+period_start <- as.Date("1997-08-18")
+period_end <- as.Date("2026-02-28")
+
+
+
+```
+
+## Functies
+
+```{r}
+
+# Deze functie zet maandelijkse CPI-gegevens om in kwartaal CPI-gegevens.
+# De kwartaal CPI-gegevens worden berekend door het gemiddelde te nemen van de CPI van de drie onderliggende maanden.
+m_to_q_CPI_data <- function(dataset){
+  
+  
+  # Dit filtert de gegevens tot alleen de maandelijkse gegevens. Als er geen maandelijkse gegevens zijn, dan resulteert deze functie in een lege dataset.
+  m_dataset <- dataset %>%
+    filter(str_detect(Perioden,"MM"))
+  
+  # Hier pakken we elke 3e perioden_date om die vn de kwartalen te krijgen
+  m_period_dates <- m_dataset$Perioden_Date
+  q_period_dates <- m_period_dates[seq(1,length(m_period_dates),3)]
+  
+  q_dataset <- m_dataset %>%
+    # We gaan nu de perioden codes van de maanden veranderen in hun respectievelijke kwartaalcodes. We maken hervoor gebruik van de consistentie van de codes voor perioden in het CBS, die zijn namelijk gestructureerd als yyyyXXww:
+    # - yyyy is het jaartal (e.g. 2018)
+    # - XX is de type periode, zoals jaar (JJ), maand (MM) of kwartaal (KW)
+    # - ww is het index, bij jaren is dit altijd 00, maar bij maand en kwartaal geeft dit aan welke dit is (e.g. MM04 voor April, KW03 voor het 3e kwartaal)
+    # Een periode code van 1997MM08 staat dus voor Augustus 1997, deze is dan weer om te zetten naar de kwartaal code door ceiling(ww/3) te gebruiken. In dit geval dus ceiling(8/3) = 3 voor de code 1997KW03
+    mutate(Perioden = paste0(substr(Perioden, 1, 4),"KW","0",ceiling(as.integer(substr(Perioden, 7, 8))/3))) %>%
+    
+    # Groupeer de periodes, om de 3 maanden tot 1 gemiddelde te krijgen.
+    # Bewaart ook de Bestedingscategorie en Wegingscoefficient
+    group_by(Bestedingscategorieen,Perioden,Wegingscoefficient_7) %>%
+    summarise(CPI_1 = mean(CPI_1, na.rm = TRUE),
+              CPIAfgeleid_2 = mean(CPIAfgeleid_2, na.rm = TRUE),
+              .groups = "drop")
+    
+  # Nu voegen we de kwartalen Perioden_Date waardes toe
+  q_dataset$Perioden_Date <- q_period_dates
+  
+  return(q_dataset)
+}
+
+# Deze functie berekent de mutaties voor de opgegeven gegevens op basis van de lag_t. lag_t is standaard ingesteld op 1, wat betekent dat dit de mutatie van de gegevens berekent op basis van het vorige tijdstip.
+# Als de data maanden of kwartalen gebruikt, dan berekent deze functie dus de respectievelijk maand of kwartaal mutaties. 
+calc_mutations <- function(data, lag_t = 1){
+  return (round((data - lag(data,lag_t)) / lag(data,lag_t) * 100,1))
+}
+
+# Deze functie combineert de andere functies om de volledige maandelijkse CPI-dataset om te zetten in een gelijkwaardige kwartaal CPI-dataset.
+get_quarterly_CPI <- function(dataset){
+  
+  q_data <- m_to_q_CPI_data(dataset)
+  
+  q_data$KwartaalmutatieCPI_3 <- calc_mutations(q_data$CPI_1)
+  q_data$KwartaalmutatieCPIAfgeleid_4 <- calc_mutations(q_data$CPIAfgeleid_2)
+  q_data$JaarmutatieCPI_5 <- calc_mutations(q_data$CPI_1,lag_t=4)
+  q_data$JaarmutatieCPIAfgeleid_6 <- calc_mutations(q_data$CPIAfgeleid_2,lag_t=4)
+
+  return(q_data)
+  
+}
+
+
+# Nu kunnen we deze functies gebruiken om de totale CPI dataset om te zetten naar kwartaaldata. Deze dataset heeft dus alle Bestedingscategorieen en Perioden van de originele dataset.
+kwartaal_CPI <- get_quarterly_CPI(data)
+
+
+```
+
+## Resultaten
+
+Aangezien de complete dataset hierboven omgezet is naar kwartaalcijfers, kunnen we nu de resultaten per product en verslagperiode verkrijgen door in deze dataset te filteren.
+
+Hiervoor gebruiken we de input parameters die we aan het begin gedefinieerd hebben. Natuurlijk kunnen er op deze manier ook heel makkelijk andere resultaten geproduceerd worden. Daarvoor hoef je alleen maar andere waardes in te vullen in de parameters van de filterfunctie.
+
+```{r echo=TRUE}
+
+# Deze functie filtert de data op basis van de gegeven producten en verslagperiode
+filter_data <- function(dataset, keys, period_1, period_2){
+  
+  dataset <- dataset %>%
+    filter(Bestedingscategorieen %in% keys, 
+        Perioden_Date >= period_1,
+        Perioden_Date <= period_2) 
+  
+  return(dataset)
+}
+
+# Nu kunnen we de statistiek filteren
+resultaten_KW_CPI <- filter_data(kwartaal_CPI,product_keys,period_start,period_end)
+
+# De titels van de Bestedingscategorie wordt hier via de metadata aan de desbetreffende categoreen toegevoegd. Dit zorgt voor wat duidelijkere grafieken
+titles_products <- metadata$Bestedingscategorieen %>% filter(Key %in% product_keys) %>% select(Key,Title)
+
+resultaten_KW_CPI <- resultaten_KW_CPI %>%
+  left_join(titles_products, by = join_by(Bestedingscategorieen == Key))
+
+```
+
+## Plotten van de resultaten
+
+### De kwartaalmutaties van de 3 prducten naast elkaar
+
+Hier worden de resultaten geplot langs elkaar, zo kun je goed het verschil zien tussen de producten. Wat meteen opvalt zijn de ontzettend grote mutaties van de gasprijs. Deze zijn te zien van 2022-2023 en komen overeen met de gascrisis door de start van de oorlog in Oekraine en de daaropvolgende normalisering van de prijzen.
+
+De huurprijzen grafiek is ook interessant, aangezien deze alleen positieve kwartaalmutaties heeft en maar 1 kwartaal per jaar uberhaupt een mutatie heeft. Dit is natuurlijk in de lijn der verwachting gezien de wetten hieromheen.
+
+De mutaties voor Gas en Fruit lijken op eerste ogenblik inderdaad sterk gecorreleerd te zijn met seizoen, aangezien deze heftig van positief naar negatief schommelt van het ene naar het andere kwartaal.
+
+```{r}
+
+plot_all3 <- ggplot(resultaten_KW_CPI, aes(x=Perioden_Date,
+                          y=KwartaalmutatieCPI_3,
+                          colour = Title)) +
+  geom_line(show.legend = FALSE) +  
+  facet_wrap(Title ~ .) +
+  labs(title = "CPI, kwartaalmutaties", x = "",
+       y = "procentuele verandering")
+
+plot_all3 +
+  theme_bw()
+
+
+```
+
+### Plot Gas CPI vs Afgeleid CPI
+
+```{r}
+
+gas_KW_CPI <- resultaten_KW_CPI %>% 
+  filter(Bestedingscategorieen == "CPI045200") %>%
+  pivot_longer(cols=c(KwartaalmutatieCPI_3,KwartaalmutatieCPIAfgeleid_4))
+
+plot_gas_CPI <- ggplot(gas_KW_CPI, aes(x=Perioden_Date,
+                          y=value,
+                          colour = name)) +
+  geom_line(show.legend = FALSE) +
+  labs(title = "CPI, kwartaalmutaties", x = "",
+       y = "procentuele verandering")
+
+plot_gas_CPI +
+  theme_bw()
+
+
+```
+
+## Resultaten opslaan in database
+
+```{r echo=TRUE}
+
+library(DBI)
+library(RSQLite)
+
+# Open connectie met een lokale SQL database
+db <-dbConnect(SQLite(),"database.sqlite")
+dbWriteTable(db, "resultaten_KW_CPI", resultaten_KW_CPI, overwrite = TRUE)
+
+# Test of het goed is gegaan:
+dbListTables(db) 
+dbGetQuery(db, "SELECT * FROM resultaten_KW_CPI")
+dbGetQuery(db, "SELECT DISTINCT Title FROM resultaten_KW_CPI")
+dbGetQuery(db, "SELECT Perioden,KwartaalmutatieCPI_3,Title FROM resultaten_KW_CPI WHERE KwartaalmutatieCPI_3 > 25 OR KwartaalmutatieCPI_3 < -25")
+
+# Sluit connectie
+dbDisconnect(db)
+
+
+```
